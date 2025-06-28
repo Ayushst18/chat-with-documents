@@ -1,0 +1,107 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: chat_with_docs_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: chat_with_docs_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000" 
+      - "9001:9001" 
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: chat_with_docs_redis
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chat_with_docs_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - chroma_data:/app/chroma_data
+
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis: 
+        condition: service_started
+    environment:
+      - POSTGRES_SERVER=postgres
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chat_with_docs_celery
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    volumes:
+      - ./app:/app/app
+      - chroma_data:/app/chroma_data
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_SERVER=postgres
+    depends_on:
+      - api
+      - redis
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: chat_with_docs_frontend
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./frontend:/app 
+    env_file:
+      - .env
+    environment:
+      - API_URL=http://api:8000/api/v1
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  minio_data:
+  chroma_data:
